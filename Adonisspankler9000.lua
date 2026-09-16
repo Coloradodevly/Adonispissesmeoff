@@ -320,3 +320,13 @@ end
 
 -- ── Done ───────────────────────────────────────────────────────
 print("[AdonisKill v2] Bypass installed.")
+
+-- Notify user via native Roblox notification (same style as badge popups)
+pcall(function()
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title    = "AdonisKill v2",
+        Text     = "Bypass installed successfully.",
+        Duration = 5,
+        Icon     = "rbxassetid://4483362458",
+    })
+end)
