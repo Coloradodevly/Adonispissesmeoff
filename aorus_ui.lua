@@ -13,7 +13,30 @@ local RunService     = game:GetService("RunService")
 local TweenService   = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer    = Players.LocalPlayer
-local PlayerGui      = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Resolve the safest GUI parent available on this executor.
+-- Preference: gethui() > CoreGui > PlayerGui (last resort, most detectable).
+local function resolveGuiParent()
+    local ok, hui = pcall(function() return gethui and gethui() end)
+    if ok and hui then return hui end
+
+    local ok2, core = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and core then
+        -- Some executors expose CoreGui but block writes to it; test with a throwaway Instance.
+        local ok3 = pcall(function()
+            local test = Instance.new("Folder")
+            test.Name = "AorusUI_Probe"
+            test.Parent = core
+            test:Destroy()
+        end)
+        if ok3 then return core end
+    end
+
+    -- Last resort
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local PlayerGui = resolveGuiParent()
 
 -- ── Palette ─────────────────────────────────────────────────
 local C = {
@@ -285,18 +308,53 @@ end
 -- ════════════════════════════════════════════════════════════
 --   LOGIN SCREEN
 -- ════════════════════════════════════════════════════════════
+
+-- shared helper: fills input, runs onLogin, updates status
+local function _tryLogin(key, keyInput, inputWrap, statusLabel, sg, opts)
+    keyInput.Text = key
+    statusLabel.TextColor3 = C.textDim
+    statusLabel.Text = "Verifying..."
+    task.spawn(function()
+        local callOk, ok = true, true
+        if opts.onLogin then
+            callOk, ok = pcall(opts.onLogin, key)
+            if not callOk then
+                warn("[AorusUI] onLogin error: " .. tostring(ok))
+                ok = false
+            end
+        end
+        if ok == false then
+            statusLabel.TextColor3 = C.danger
+            statusLabel.Text = "Invalid key."
+            tween(inputWrap, { BackgroundColor3 = Color3.fromRGB(60,20,20) }, 0.1)
+            task.delay(0.4, function()
+                tween(inputWrap, { BackgroundColor3 = C.panel }, 0.3)
+            end)
+        else
+            statusLabel.TextColor3 = C.accent
+            statusLabel.Text = "Authenticated!"
+            task.delay(0.6, function() sg:Destroy() end)
+        end
+    end)
+end
+
 function AorusUI.createLogin(opts)
     opts = opts or {}
-    -- opts.enabled  : boolean, default true. false = skip key system entirely.
-    -- opts.logo     : string URL or nil
-    -- opts.onLogin  : function(key) -> bool
-    -- opts.onSkip   : function() -- called instead of onLogin when enabled = false
+    -- opts.enabled         : boolean, default true. false = skip key system entirely.
+    -- opts.logo            : string URL or nil
+    -- opts.onLogin         : function(key) -> bool
+    -- opts.onSkip          : function() -- called instead of onLogin when enabled = false
+    -- opts.keyFromExternal : string URL -- when provided, a "GET KEY" button appears
+    --                        below LOGIN. Clicking it copies the URL to the user's
+    --                        clipboard and briefly shows "Link copied!" in the status.
 
     if opts.enabled == false then
         if opts.onSkip then
-            opts.onSkip()
+            local ok, err = pcall(opts.onSkip)
+            if not ok then warn("[AorusUI] onSkip error: " .. tostring(err)) end
         elseif opts.onLogin then
-            opts.onLogin("")  -- treat as auto-authenticated
+            local ok, err = pcall(opts.onLogin, "")
+            if not ok then warn("[AorusUI] onLogin error: " .. tostring(err)) end
         end
         return { gui = nil, input = nil, skipped = true }
     end
@@ -451,25 +509,67 @@ function AorusUI.createLogin(opts)
     }, container)
 
     loginBtn.MouseButton1Click:Connect(function()
-        local key = keyInput.Text
-        statusLabel.TextColor3 = C.textDim
-        statusLabel.Text = "Verifying..."
-        task.spawn(function()
-            local ok = opts.onLogin and opts.onLogin(key)
-            if ok == false then
-                statusLabel.TextColor3 = C.danger
-                statusLabel.Text = "Invalid key."
-                tween(inputWrap, { BackgroundColor3 = Color3.fromRGB(60,20,20) }, 0.1)
-                task.delay(0.4, function()
-                    tween(inputWrap, { BackgroundColor3 = C.panel }, 0.3)
-                end)
-            else
-                statusLabel.TextColor3 = C.accent
-                statusLabel.Text = "Authenticated!"
-                task.delay(0.6, function() sg:Destroy() end)
-            end
-        end)
+        _tryLogin(keyInput.Text, keyInput, inputWrap, statusLabel, sg, opts)
     end)
+
+    -- "Get Key" button — only shown when keyFromExternal is provided
+    if opts.keyFromExternal then
+        local getKeyBtn = make("TextButton", {
+            Size            = UDim2.new(1, 0, 0, 36),
+            BackgroundColor3 = C.panel,
+            BorderSizePixel  = 0,
+            Text             = "GET KEY",
+            TextColor3       = C.accent,
+            Font             = Enum.Font.GothamBold,
+            TextSize         = 13,
+            LayoutOrder      = 5,
+            AutoButtonColor  = false,
+        }, container)
+        make("UICorner", { CornerRadius = UDim.new(0, 10) }, getKeyBtn)
+        make("UIStroke", { Color = C.accent, Thickness = 1 }, getKeyBtn)
+
+        -- subtle hover
+        getKeyBtn.MouseEnter:Connect(function()
+            tween(getKeyBtn, { BackgroundColor3 = Color3.fromRGB(28, 38, 44) }, 0.12)
+        end)
+        getKeyBtn.MouseLeave:Connect(function()
+            tween(getKeyBtn, { BackgroundColor3 = C.panel }, 0.12)
+        end)
+        getKeyBtn.MouseButton1Down:Connect(function()
+            tween(getKeyBtn, { Size = UDim2.new(0.97, 0, 0, 36) }, 0.08)
+        end)
+        getKeyBtn.MouseButton1Up:Connect(function()
+            tween(getKeyBtn, { Size = UDim2.new(1, 0, 0, 36) }, 0.1)
+        end)
+
+        getKeyBtn.MouseButton1Click:Connect(function()
+            -- copy link to clipboard (setclipboard is available in most executors)
+            local copied = false
+            if type(setclipboard) == "function" then
+                pcall(setclipboard, opts.keyFromExternal)
+                copied = true
+            elseif type(Clipboard) == "table" and type(Clipboard.set) == "function" then
+                pcall(Clipboard.set, opts.keyFromExternal)
+                copied = true
+            end
+
+            if copied then
+                statusLabel.TextColor3 = C.accent
+                statusLabel.Text       = "Link copied to clipboard!"
+            else
+                -- executor has no clipboard API — show the link directly in status
+                statusLabel.TextColor3 = C.textDim
+                statusLabel.Text       = opts.keyFromExternal
+            end
+
+            -- reset status after 3 seconds
+            task.delay(3, function()
+                if statusLabel and statusLabel.Parent then
+                    statusLabel.Text = ""
+                end
+            end)
+        end)
+    end
 
     return { gui = sg, input = keyInput }
 end
@@ -594,6 +694,15 @@ function AorusUI.createWindow(opts)
 
     -- ── Tab builder ────────────────────────────────────────
     function window:addTab(icon, label, order)
+        local ok, result = pcall(self._addTabImpl, self, icon, label, order)
+        if not ok then
+            warn("[AorusUI] addTab('" .. tostring(label) .. "') failed safely: " .. tostring(result))
+            return nil
+        end
+        return result
+    end
+
+    function window:_addTabImpl(icon, label, order)
         -- Sidebar icon button
         local btn = make("ImageButton", {
             Size = UDim2.fromOffset(SIDEBAR_W, SIDEBAR_W),
@@ -658,6 +767,13 @@ function AorusUI.createWindow(opts)
     end
 
     function window:selectTab(idx)
+        local ok, err = pcall(self._selectTabImpl, self, idx)
+        if not ok then
+            warn("[AorusUI] selectTab(" .. tostring(idx) .. ") failed safely: " .. tostring(err))
+        end
+    end
+
+    function window:_selectTabImpl(idx)
         for i, b in ipairs(self._tabs) do
             local active = (i == idx)
             local strip = b:GetAttribute("strip") -- stored differently, use FindFirstChild
@@ -780,11 +896,16 @@ function AorusUI.addToggle(page, label, default, onChange, order)
 
     local function setState(val)
         state = val
-        tween(dot, { BackgroundColor3 = state and C.accent or C.border }, 0.15)
+        pcall(tween, dot, { BackgroundColor3 = state and C.accent or C.border }, 0.15)
         if textLabel then
-            tween(textLabel, { TextColor3 = state and C.text or C.textDim }, 0.15)
+            pcall(tween, textLabel, { TextColor3 = state and C.text or C.textDim }, 0.15)
         end
-        if onChange then onChange(state) end
+        if onChange then
+            local ok, err = pcall(onChange, state)
+            if not ok then
+                warn("[AorusUI] toggle '" .. tostring(label) .. "' onChange error: " .. tostring(err))
+            end
+        end
     end
 
     clickArea.MouseButton1Click:Connect(function()
@@ -807,7 +928,12 @@ function AorusUI.addToggle(page, label, default, onChange, order)
 
     -- Config button callback
     function toggle:onConfig(fn)
-        self.configBtn.MouseButton1Click:Connect(fn)
+        self.configBtn.MouseButton1Click:Connect(function(...)
+            local ok, err = pcall(fn, ...)
+            if not ok then
+                warn("[AorusUI] toggle '" .. tostring(label) .. "' onConfig error: " .. tostring(err))
+            end
+        end)
     end
 
     return toggle
@@ -868,7 +994,12 @@ end
 local login = AorusUI.createLogin({
     logoText = "AORUS",
     subtitle = "ESP",
-    onLogin  = function(key)
+
+    -- Adds a "GET KEY" button below LOGIN.
+    -- Clicking it copies this link to the user's clipboard.
+    keyFromExternal = "https://discord.gg/yourserver",
+
+    onLogin = function(key)
         return key == "MY_KEY_HERE"
     end,
 })
@@ -922,5 +1053,37 @@ RunService.RenderStepped:Connect(function()
 end)
 
 ]]
+
+-- ════════════════════════════════════════════════════════════
+--   SAFETY WRAPPER
+--   Wraps every public AorusUI.* function in xpcall so that if
+--   a future Roblox/executor/game update breaks an internal
+--   assumption (e.g. a renamed Instance, changed API surface),
+--   the error is caught and logged instead of hard-crashing the
+--   whole script. On failure the wrapped call returns nil (or
+--   opts.fallback if supplied as an extra hidden arg).
+-- ════════════════════════════════════════════════════════════
+local function safeWrap(name, fn)
+    return function(...)
+        local args = { ... }
+        local ok, result = xpcall(function()
+            return fn(table.unpack(args))
+        end, function(err)
+            local trace = debug.traceback and debug.traceback(err, 2) or err
+            warn(("[AorusUI] '%s' failed safely: %s"):format(name, tostring(trace)))
+            return err
+        end)
+        if ok then
+            return result
+        end
+        return nil
+    end
+end
+
+for fnName, fn in pairs(AorusUI) do
+    if type(fn) == "function" then
+        AorusUI[fnName] = safeWrap(fnName, fn)
+    end
+end
 
 return AorusUI
